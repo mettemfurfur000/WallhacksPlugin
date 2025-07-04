@@ -1,0 +1,7 @@
+*.zip
+*.dll
+*.pdb
+*.sln
+*.json
+bin/*
+obj/*

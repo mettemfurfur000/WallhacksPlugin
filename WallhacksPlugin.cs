@@ -4,9 +4,11 @@ using System.Drawing;
 using System.Numerics;
 using System.Reflection;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes.Registration;
+using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Entities;
 // C:\msys64\home\mttffr\steamcmd\steamapps\common\Counter-Strike Global Offensive\game\csgo\addons\counterstrikesharp\api\CounterStrikeSharp.API.dll</HintPath>
@@ -15,10 +17,8 @@ namespace WallhacksPlugin;
 
 public class WallConfig : BasePluginConfig
 {
-    [JsonPropertyName("ColorT")] public string ColorT { get; set; } = "#FAFAD2";
-    [JsonPropertyName("ColorCT")] public string ColorCT { get; set; } = "#ADD8E6";
-    [JsonPropertyName("SetDefaultWalleTeamOnStart")] public bool SetDefaultWalleTeamOnStart { get; set; } = false;
-    [JsonPropertyName("DefaultWallerTeam")] public string DefaultWallerTeam { get; set; } = "t";
+    [JsonPropertyName("ColorT")] public string ColorT { get; set; } = "#FFFF60";
+    [JsonPropertyName("ColorCT")] public string ColorCT { get; set; } = "#6060FF";
 }
 
 public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
@@ -26,32 +26,35 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
     public override string ModuleName => "WallhacksPlugin";
     public override string ModuleVersion => "0.2.5";
     public override string ModuleAuthor => "tem";
+
     public WallConfig Config { get; set; } = null!;
     public void OnConfigParsed(WallConfig config) { Config = config; }
-    private string? wallerTeam = null;
-    private CCSGameRules? gameRules = null;
-    private List<CBaseModelEntity> glowModels = new List<CBaseModelEntity>();
-    private int flipTeam(int num)
-    {
-        return num == 2 ? 3 : 2;
-    }
 
-    private void printSomewhere(CCSPlayerController? player, string s)
-    {
-        if (player == null)
-            Console.WriteLine(s);
-        else
-            player.PrintToChat(s);
-    }
+    private CCSGameRules? gameRules = null;
+    // private List<CBaseModelEntity> glowModels = new List<CBaseModelEntity>();
+
+    private Dictionary<int, Tuple<CBaseModelEntity, CBaseModelEntity>> pairModels = [];
+    private Dictionary<int, bool> users = [];
 
     public override void Load(bool hotReload)
     {
+        RegisterListener<Listeners.OnTick>(() =>
+        {
+            if (Server.TickCount % 16 != 0)
+                return;
+
+            GlowEveryone();
+        });
+
         RegisterEventHandler<EventGameStart>((@event, info) =>
         {
             gameRules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").First().GameRules!;
 
-            if (Config.SetDefaultWalleTeamOnStart)
-                wallerTeam = Config.DefaultWallerTeam;
+            if (gameRules == null)
+            {
+                Console.WriteLine("Error: GameRules is null on game start");
+                return HookResult.Continue;
+            }
 
             return HookResult.Continue;
         });
@@ -59,49 +62,94 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
         RegisterEventHandler<EventRoundStart>((@event, info) =>
         {
             if (gameRules == null)
-                return HookResult.Continue;
-
-            if (gameRules.TotalRoundsPlayed == 12)
-            {/* Server.PrintToChatAll("Match point event");*/
-            }
-            else
-                return HookResult.Continue;
-
-            if (wallerTeam != null)
-                wallerTeam = wallerTeam == "ct" ? "t" : "ct";
-
-            return HookResult.Continue;
-        }, HookMode.Post);
-
-        RegisterEventHandler<EventRoundStart>((@event, info) =>
-        {
-            if (wallerTeam != null)
             {
-                //StopGlowing();
-                GlowThisTeam(wallerTeam);
-                // Server.PrintToChatAll("Reapplied glow effect");
+                Console.WriteLine("Error: GameRules is null");
+
+                gameRules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").First().GameRules!;
+
+                if (gameRules == null)
+                {
+                    Console.WriteLine("Error: GameRules is still null");
+                    return HookResult.Continue;
+                }
             }
+
             return HookResult.Continue;
         }, HookMode.Post);
+
+        RegisterListener<Listeners.CheckTransmit>(infoList =>
+        {
+            if (pairModels.Count == 0)
+                return;
+
+            foreach ((CCheckTransmitInfo info, CCSPlayerController? player) in infoList)
+            {
+                if (player == null)
+                    continue;
+
+                if (users.TryGetValue(player.Slot, out bool value))
+                    if (value)
+                        continue;
+
+                foreach (var models in pairModels)
+                {
+                    info.TransmitEntities.Remove(models.Value.Item1);
+                    info.TransmitEntities.Remove(models.Value.Item2);
+                }
+            }
+        });
 
         Console.WriteLine("WallhacksPlugin loaded.");
     }
 
+    [RequiresPermissions("@css/admin")]
+    [ConsoleCommand("wh_test", "todo")]
+    [CommandHelper(minArgs: 0, usage: "", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnWhTest(CCSPlayerController? player, CommandInfo info)
+    {
+        StopGlowing();
+        GlowEveryone();
+    }
+
+    [RequiresPermissions("@css/admin")]
+    [ConsoleCommand("wh", "todo")]
+    [CommandHelper(minArgs: 2, usage: "<user> {on/off}", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnWhGrant(CCSPlayerController? player, CommandInfo info)
+    {
+        var pattern = info.GetArg(1);
+        var grant = info.GetArg(2);
+        bool? setTrue = null;
+
+        if (grant == "on") setTrue = true;
+        if (grant == "off") setTrue = false;
+
+        if (setTrue == null)
+            info.ReplyToCommand("Toggling...");
+
+        var selected = SelectPlayers(pattern);
+
+        if (!selected.Any())
+            info.ReplyToCommand("No players found");
+
+        selected.ToList().ForEach((p) => users[p.Slot] = (bool)(setTrue != null ? setTrue : !users[p.Slot]));
+    }
+
+    [RequiresPermissions("@css/admin")]
     [ConsoleCommand("wh_color", "todo")]
-    [CommandHelper(minArgs: 2, usage: "{ct/t/both}", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    [CommandHelper(minArgs: 2, usage: "{ct/t/both} [hexcode]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnWhSetColor(CCSPlayerController? player, CommandInfo info)
     {
         string targetTeam = info.ArgByIndex(1).ToLower();
 
         if (targetTeam != "ct" && targetTeam != "t" && targetTeam != "both")
         {
-            printSomewhere(player, "Invalid team");
+            info.ReplyToCommand("Invalid team");
             return;
         }
 
         string colorhex = info.ArgByIndex(2).ToLower();
         Color colorInput = ColorTranslator.FromHtml(colorhex);
-        printSomewhere(player, "Setting color to " + colorInput);
+        info.ReplyToCommand("Setting color to " + colorInput);
 
         switch (targetTeam)
         {
@@ -116,80 +164,80 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
                 Config.ColorCT = colorhex;
                 break;
         }
+        ChangeColorNow();
     }
 
-    [ConsoleCommand("wh", "todo")]
-    [CommandHelper(minArgs: 1, usage: "{ct/t/both/off}", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
-    public void OnWhCommand(CCSPlayerController? player, CommandInfo info)
+    [RequiresPermissions("@css/admin")]
+    [ConsoleCommand("wh_team", "todo")]
+    [CommandHelper(minArgs: 1, usage: "{ct/t}", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnWhTeamCommand(CCSPlayerController? player, CommandInfo info)
     {
         string targetTeam = info.ArgByIndex(1).ToLower();
 
-        if (targetTeam != "ct" && targetTeam != "t" && targetTeam != "off" && targetTeam != "both")
+        if (targetTeam != "ct" && targetTeam != "t")
         {
-            printSomewhere(player, "Invalid option");
+            info.ReplyToCommand("Invalid option");
             return;
         }
 
-        switch (targetTeam)
-        {
-            case "ct":
-            case "t":
-            case "both":
-                wallerTeam = targetTeam;
-                GlowThisTeam(wallerTeam);
-                break;
-            case "off":
-                StopGlowing();
-                wallerTeam = null;
-                break;
-        }
+        byte teamNumTarget = (byte)(targetTeam == "t" ? 2 : 3);
 
-        var status = wallerTeam != null ? "Enabled" : "Disabled";
-        targetTeam = targetTeam == "off" ? "all" : targetTeam;
-        printSomewhere(player, $"XRay {status} for {targetTeam}.");
+        var players = Utilities.GetPlayers();
+
+        if (!players.Any())
+            info.ReplyToCommand("No players found");
+
+        players.ToList().ForEach((p) => users[p.Slot] = p.TeamNum == teamNumTarget);
     }
 
-    public override void Unload(bool hotReload)
-    {
-        RemoveCommand("wh", (p, i) => { });
-        Console.WriteLine("WallhacksPlugin unloaded.");
-    }
+    // public override void Unload(bool hotReload)
+    // {
+    //     RemoveCommand("wh", (p, i) => { });
+    //     RemoveCommand("wh_color", (p, i) => { });
+    //     Console.WriteLine("WallhacksPlugin unloaded.");
+    // }
 
     public static bool IsPlayerConnected(CCSPlayerController player)
     {
         return player.Connected == PlayerConnectedState.PlayerConnected;
     }
 
-    private void GlowThisTeam(string team)
+    public void ChangeColorNow()
     {
-        if (team == "both")
-        {
-            GlowThisTeam("ct");
-            GlowThisTeam("t");
-            return;
-        }
+        // foreach (var item in glowModels)
+        //     if (item.IsValid)
+        //         item.Glow.GlowColorOverride = ColorTranslator.FromHtml(item.Glow.GlowTeam == 2 ? Config.ColorCT : Config.ColorT);
+        // StopGlowing();
+        // if (wallerTeam != null)
+        //     GlowThisTeam(wallerTeam);
+    }
 
+    public static String WildCardToRegular(String value)
+    {
+        return "^" + Regex.Escape(value).Replace("\\*", ".*") + "$";
+    }
 
-        int teamNum = team == "ct" ? 3 : 2;
-        // if (flipTeams)
-        //     // Server.PrintToChatAll($"Flipping teamNum {teamNum}");
+    public static IEnumerable<CCSPlayerController> SelectPlayers(string name_pattern)
+    {
+        string r_pattern = WildCardToRegular(name_pattern);
 
+        return Utilities.GetPlayers()
+            .Where(player => Regex.IsMatch(player.PlayerName, r_pattern, RegexOptions.IgnoreCase));
+    }
+
+    private void GlowEveryone()
+    {
         foreach (CCSPlayerController ctrl in Utilities.GetPlayers().Where(IsPlayerConnected))
         {
-            if (ctrl.TeamNum == teamNum)
-            {
-                // Server.PrintToChatAll($"Ignoring {ctrl.PlayerName}");
-                continue;
-            }
-
             CCSPlayerPawn? pawn = ctrl.PlayerPawn.Value;
             if (pawn == null)
             {
-                // Server.PrintToChatAll("Failed to find player pawn.");
+                Console.WriteLine("Failed to find player pawn for " + ctrl.PlayerName);
                 return;
             }
 
-            MakePawnGlow(pawn, (byte)(teamNum));
+            if (!pairModels.ContainsKey(pawn.OriginalController.Value!.Slot))
+                MakePawnGlow(pawn, (byte)(pawn.TeamNum == 2 ? 3 : 2));
         }
     }
 
@@ -197,21 +245,19 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
     {
         if (pawn.Controller?.Value == null)
         {
-            Server.PrintToChatAll("Failed to make pawn glow: Controller is null.");
+            Console.WriteLine("Failed to make pawn glow: Controller is null.");
             return;
         }
 
-        // Server.PrintToChatAll($"Making {pawn.Controller.Value.PlayerName} glow.");
         CBaseModelEntity? modelGlow = Utilities.CreateEntityByName<CBaseModelEntity>("prop_dynamic");
         CBaseModelEntity? modelRelay = Utilities.CreateEntityByName<CBaseModelEntity>("prop_dynamic");
 
         if (modelGlow == null || modelRelay == null)
             return;
 
-
         if (pawn.CBodyComponent?.SceneNode == null)
         {
-            Server.PrintToChatAll("Failed to make pawn glow: CBodyComponent or SceneNode is null.");
+            Console.WriteLine("Failed to make pawn glow: CBodyComponent or SceneNode is null.");
             return;
         }
 
@@ -231,25 +277,40 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
         // 3 = ct
 
         modelGlow.Glow.GlowColorOverride = ColorTranslator.FromHtml(teamNum == 2 ? Config.ColorCT : Config.ColorT);
-        Server.PrintToChatAll($"color: {modelGlow.Glow.GlowColorOverride}");
-        modelGlow.Glow.GlowRange = 5000;
+        //Console.WriteLine($"color: {modelGlow.Glow.GlowColorOverride}");
+        modelGlow.Glow.GlowRange = 4096;
         modelGlow.Glow.GlowTeam = teamNum;
         modelGlow.Glow.GlowType = 3;
-        modelGlow.Glow.GlowRangeMin = 100;
+        modelGlow.Glow.GlowRangeMin = 64;
 
         modelRelay.AcceptInput("FollowEntity", pawn, modelRelay, "!activator");
         modelGlow.AcceptInput("FollowEntity", modelRelay, modelGlow, "!activator");
 
-        glowModels.Add(modelRelay);
-        glowModels.Add(modelGlow);
+        // glowModels.Add(modelRelay);
+        // glowModels.Add(modelGlow);
+        pairModels[pawn.OriginalController.Value!.Slot] = new Tuple<CBaseModelEntity, CBaseModelEntity>(modelGlow, modelRelay);
     }
 
     private void StopGlowing()
     {
-        foreach (var item in glowModels)
-            if (item.IsValid)
-                item.Remove();
+        foreach (var item in pairModels)
+        {
+            if (item.Value.Item1.IsValid)
+                item.Value.Item1.Remove();
+            if (item.Value.Item2.IsValid)
+                item.Value.Item2.Remove();
+        }
 
-        glowModels.Clear();
+        pairModels.Clear();
+
+        // extra code to remove everything that glows like things we spawned
+
+        var entites = Utilities.FindAllEntitiesByDesignerName<CBaseModelEntity>("prop_dynamic");
+
+        entites.ToList().ForEach((e) =>
+        {
+            if (e.Glow.GlowType == 3)
+                e.Remove();
+        });
     }
 }
