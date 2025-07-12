@@ -17,8 +17,8 @@ namespace WallhacksPlugin;
 
 public class WallConfig : BasePluginConfig
 {
-    [JsonPropertyName("ColorT")] public string ColorT { get; set; } = "#FFFF60";
-    [JsonPropertyName("ColorCT")] public string ColorCT { get; set; } = "#6060FF";
+    [JsonPropertyName("ColorT")] public string ColorT { get; set; } = "#ffc800ff";
+    [JsonPropertyName("ColorCT")] public string ColorCT { get; set; } = "#4c00ffff";
 }
 
 public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
@@ -43,7 +43,7 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
             if (Server.TickCount % 128 != 0)
                 return;
 
-            Server.NextFrame(() =>
+            Server.NextWorldUpdate(() =>
             {
                 StopGlowing();
                 GlowEveryone();
