@@ -40,10 +40,17 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
     {
         RegisterListener<Listeners.OnTick>(() =>
         {
-            if (Server.TickCount % 16 != 0)
+            if (Server.TickCount % 128 != 0)
                 return;
 
-            GlowEveryone();
+            Server.NextFrame(() =>
+            {
+                StopGlowing();
+                GlowEveryone();
+            });
+
+            // check for all players whio don hav the wallhek entity attached
+            // CheckGlow();
         });
 
         RegisterEventHandler<EventGameStart>((@event, info) =>
@@ -84,12 +91,20 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
 
             foreach ((CCheckTransmitInfo info, CCSPlayerController? player) in infoList)
             {
-                if (player == null)
+                if (player == null) // if player is not real he can see the models
                     continue;
 
+                // if the player is in our user list, he has wallhak and should wee the glow models
                 if (users.TryGetValue(player.Slot, out bool value))
                     if (value)
+                    {
+                        var selfModel = pairModels[player.Slot];
+
+                        info.TransmitEntities.Remove(selfModel.Item1);
+                        info.TransmitEntities.Remove(selfModel.Item2);
+                        
                         continue;
+                    }
 
                 foreach (var models in pairModels)
                 {
@@ -245,7 +260,7 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
     {
         if (pawn.Controller?.Value == null)
         {
-            Console.WriteLine("Failed to make pawn glow: Controller is null.");
+            // Console.WriteLine("Failed to make pawn glow: Controller is null.");
             return;
         }
 
@@ -257,17 +272,19 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
 
         if (pawn.CBodyComponent?.SceneNode == null)
         {
-            Console.WriteLine("Failed to make pawn glow: CBodyComponent or SceneNode is null.");
+            // Console.WriteLine("Failed to make pawn glow: CBodyComponent or SceneNode is null.");
             return;
         }
 
         string modelName = pawn.CBodyComponent.SceneNode.GetSkeletonInstance().ModelState.ModelName;
 
+        modelRelay.CBodyComponent!.SceneNode!.Owner!.Entity!.Flags = (uint)(modelRelay.CBodyComponent!.SceneNode!.Owner!.Entity!.Flags & ~(1 << 2));
         modelRelay.SetModel(modelName);
         modelRelay.Spawnflags = 256u;
         modelRelay.RenderMode = RenderMode_t.kRenderNone;
         modelRelay.DispatchSpawn();
 
+        modelGlow.CBodyComponent!.SceneNode!.Owner!.Entity!.Flags = (uint)(modelGlow.CBodyComponent!.SceneNode!.Owner!.Entity!.Flags & ~(1 << 2));
         modelGlow.SetModel(modelName);
         modelGlow.Spawnflags = 256u;
         modelGlow.DispatchSpawn();
@@ -289,6 +306,18 @@ public class WallhacksPlugin : BasePlugin, IPluginConfig<WallConfig>
         // glowModels.Add(modelRelay);
         // glowModels.Add(modelGlow);
         pairModels[pawn.OriginalController.Value!.Slot] = new Tuple<CBaseModelEntity, CBaseModelEntity>(modelGlow, modelRelay);
+    }
+
+    private void CheckGlow()
+    {
+        var players = Utilities.GetPlayers();
+        players.ForEach(p =>
+        {
+            if (!pairModels.ContainsKey(p.Slot))
+            {
+                MakePawnGlow(p.PlayerPawn.Value!, (byte)(p.PlayerPawn.Value!.TeamNum == 2 ? 3 : 2));
+            }
+        });
     }
 
     private void StopGlowing()
